@@ -1,0 +1,135 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # SQL Server
+  # ─────────────────────────────────────────────
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ecommerce-sqlserver
+    environment:
+      SA_PASSWORD: "${DB_PASSWORD:-YourStrong@Passw0rd}"
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-?"] 
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────────
+  # Redis
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis1
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────────
+  # Azurite (Azure Blob Storage emulator)
+  # ─────────────────────────────────────────────
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: ecommerce-azurite1
+    ports:
+      - "10000:10000"   # Blob service
+      - "10001:10001"   # Queue service
+      - "10002:10002"   # Table service
+    volumes:
+      - azurite_data:/data
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────────
+  # E-Commerce API
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecommerce-api
+    ports:
+      - "8080:8080"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Production}"
+
+      # Connection Strings (override the localdb ones in appsettings.json)
+      ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=ECommerceDb;User Id=sa;Password=${DB_PASSWORD:-YourStrong@Passw0rd};TrustServerCertificate=True;"
+      ConnectionStrings__HangfireConnection: "Server=sqlserver,1433;Database=ECommerceDb;User Id=sa;Password=${DB_PASSWORD:-YourStrong@Passw0rd};TrustServerCertificate=True;"
+      ConnectionStrings__Redis: "redis:6379"
+
+      # JWT
+      JwtSettings__Secret: "${JWT_SECRET:-E-Commerce-Super-Secret-Key-Min-32-Chars-Long!}"
+      JwtSettings__Issuer: "${JWT_ISSUER:-E-Commerce-API}"
+      JwtSettings__Audience: "${JWT_AUDIENCE:-E-Commerce-Clients}"
+      JwtSettings__ExpiryMinutes: "${JWT_EXPIRY_MINUTES:-60}"
+      JwtSettings__RefreshTokenExpiryDays: "${JWT_REFRESH_EXPIRY_DAYS:-7}"
+
+      # Email
+      EmailSettings__SmtpServer: "${EMAIL_SMTP_SERVER:-smtp.gmail.com}"
+      EmailSettings__Port: "${EMAIL_PORT:-587}"
+      EmailSettings__SenderName: "${EMAIL_SENDER_NAME:-E-Commerce App}"
+      EmailSettings__SenderEmail: "${EMAIL_SENDER_EMAIL}"
+      EmailSettings__AppPassword: "${EMAIL_APP_PASSWORD}"
+
+      # Stripe
+      StripeSettings__SecretKey: "${STRIPE_SECRET_KEY}"
+      StripeSettings__PublishableKey: "${STRIPE_PUBLISHABLE_KEY}"
+      StripeSettings__WebhookSecret: "${STRIPE_WEBHOOK_SECRET}"
+
+      # Azure Storage (Azurite inside Docker)
+      AzureStorageSettings__ConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+      AzureStorageSettings__ProductImagesContainer: "product-images"
+      AzureStorageSettings__UserAvatarsContainer: "user-avatars"
+
+      # Rate Limiting
+      RateLimitingSettings__AuthLimit: "${RATE_LIMIT_AUTH:-5}"
+      RateLimitingSettings__CatalogLimit: "${RATE_LIMIT_CATALOG:-20}"
+      RateLimitingSettings__CheckoutLimit: "${RATE_LIMIT_CHECKOUT:-3}"
+
+    volumes:
+      - api_logs:/app/logs
+    networks:
+      - ecommerce-network
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────
+volumes:
+  sqlserver_data:
+  redis_data: 
+  azurite_data:
+  api_logs:
+
+# ─────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────
+networks:
+  ecommerce-network:
+    driver: bridge
